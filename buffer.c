@@ -18,7 +18,13 @@
 #include <string.h>
 #include <stdlib.h>
 #include <unistd.h>
+#ifdef __linux__
 #include <sys/epoll.h>
+#else
+#include <sys/types.h>
+#include <sys/event.h>
+#include <sys/time.h>
+#endif
 
 #include "buffer.h"
 #include "logging.h"
@@ -789,18 +795,30 @@ static void try_to_sync_buffers(struct block_device *bdev)
 
 static void *buffer_writeback_thread(void *arg)
 {
-	struct epoll_event epev = {0};
 	struct block_device *bdev = arg;
+#ifdef __linux__
+	struct epoll_event epev = {0};
 	int epfd = epoll_create(1);
 	if (epfd < 0)
 		return NULL;
 
 	epev.events = EPOLLIN;
 	epoll_ctl(epfd, EPOLL_CTL_ADD, bdev->bd_bh_writeback_wakeup_fd[0], &epev);
+#else
+	int kq = kqueue();
+	struct kevent *evlist = malloc(sizeof(struct kevent));
+	struct kevent *chlist = malloc(sizeof(struct kevent) * 2);
+
+	EV_SET(&chlist, bdev->bd_bh_writeback_wakeup_fd[0], EVFILT_READ, EV_ADD, 0, 0, NULL);
+#endif
 
 	while (1) {
 		int ret;
+#ifdef __linux__
 		ret = epoll_wait(epfd, &epev, 1, buffer_writeback_ms);
+#else
+		ret = kevent(kq, chlist, 1, evlist, 1, buffer_writeback_ms);
+#endif
 		if (ret > 0) {
 			/* We got an nofication. */
 			signed char command;
@@ -808,7 +826,7 @@ static void *buffer_writeback_thread(void *arg)
 			try_to_sync_buffers(bdev);
 			if (bdev_is_notify_exiting(command))
 				break;
-			
+
 			continue;
 		}
 		if (ret == 0) {
@@ -819,7 +837,11 @@ static void *buffer_writeback_thread(void *arg)
 			break;
 
 	}
+#ifdef __linux__
 	close(epfd);
+#else
+	close(kq);
+#endif
 	return NULL;
 }
 
